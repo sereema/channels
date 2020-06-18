@@ -18,7 +18,6 @@ setup(
     ],
     extras_require={
         'tests': [
-            'daphne~=2.5',
             'pytest~=5.4',
             "pytest-django~=3.4",
             "pytest-asyncio~=0.10",

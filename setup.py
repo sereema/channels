@@ -15,11 +15,11 @@ setup(
     install_requires=[
         'Django>=2.2',
         'asgiref~=3.2',
-        'daphne~=2.3',
     ],
     extras_require={
         'tests': [
-            'pytest~=4.4',
+            'daphne~=2.5',
+            'pytest~=5.4',
             "pytest-django~=3.4",
             "pytest-asyncio~=0.10",
             "async_generator~=1.10",

@@ -1,4 +1,5 @@
 import datetime
+import functools
 import time
 from importlib import import_module
 
@@ -146,90 +147,85 @@ class SessionMiddleware:
         We intercept the send() callable so we can do session saves and
         add session cookie overrides to send back.
         """
-        self.scope = dict(scope)
-        if "session" in self.scope:
+        scope = dict(scope)
+        if "session" in scope:
             # There's already session middleware of some kind above us, pass
             # that through
-            self.activated = False
+            return await self.inner(scope, receive, send)
         else:
             # Make sure there are cookies in the scope
-            if "cookies" not in self.scope:
+            if "cookies" not in scope:
                 raise ValueError(
                     "No cookies in scope - SessionMiddleware needs to run "
                     "inside of CookieMiddleware."
                 )
+            session_key = scope["cookies"].get(self.cookie_name)
             # Parse the headers in the scope into cookies
-            self.scope["session"] = LazyObject()
-            self.activated = True
+            scope["session"] = LazyObject()
+            scope["session"]._wrapped = await database_sync_to_async(
+                self.session_store
+            )(session_key)
+            wrapped_send = functools.partial(self.send, scope, send)
+            return await self.inner(scope, receive, wrapped_send)
 
-        # Resolve the session now we can do it in a blocking way
-        session_key = self.scope["cookies"].get(self.cookie_name)
-        self.scope["session"]._wrapped = await database_sync_to_async(
-            self.session_store
-        )(session_key)
-        # Override send
-        self.real_send = send
-        return await self.inner(self.scope, receive, self.send)
-
-    async def send(self, message):
+    async def send(self, scope, real_send, message):
         """
         Overridden send that also does session saves/cookies.
         """
         # Only save session if we're the outermost session middleware
-        if self.activated:
-            modified = self.scope["session"].modified
-            empty = self.scope["session"].is_empty()
-            # If this is a message type that we want to save on, and there's
-            # changed data, save it. We also save if it's empty as we might
-            # not be able to send a cookie-delete along with this message.
-            if (
-                message["type"] in self.save_message_types
-                and message.get("status", 200) != 500
-                and (modified or settings.SESSION_SAVE_EVERY_REQUEST)
-            ):
-                await database_sync_to_async(self.save_session)()
-                # If this is a message type that can transport cookies back to the
-                # client, then do so.
-                if message["type"] in self.cookie_response_message_types:
-                    if empty:
-                        # Delete cookie if it's set
-                        if settings.SESSION_COOKIE_NAME in self.scope["cookies"]:
-                            CookieMiddleware.delete_cookie(
-                                message,
-                                settings.SESSION_COOKIE_NAME,
-                                path=settings.SESSION_COOKIE_PATH,
-                                domain=settings.SESSION_COOKIE_DOMAIN,
-                            )
-                    else:
-                        # Get the expiry data
-                        if self.scope["session"].get_expire_at_browser_close():
-                            max_age = None
-                            expires = None
-                        else:
-                            max_age = self.scope["session"].get_expiry_age()
-                            expires_time = time.time() + max_age
-                            expires = http_date(expires_time)
-                        # Set the cookie
-                        CookieMiddleware.set_cookie(
+        modified = scope["session"].modified
+        empty = scope["session"].is_empty()
+        # If this is a message type that we want to save on, and there's
+        # changed data, save it. We also save if it's empty as we might
+        # not be able to send a cookie-delete along with this message.
+        if (
+            message["type"] in self.save_message_types
+            and message.get("status", 200) != 500
+            and (modified or settings.SESSION_SAVE_EVERY_REQUEST)
+        ):
+            await database_sync_to_async(self.save_session)(scope)
+            # If this is a message type that can transport cookies back to the
+            # client, then do so.
+            if message["type"] in self.cookie_response_message_types:
+                if empty:
+                    # Delete cookie if it's set
+                    if settings.SESSION_COOKIE_NAME in scope["cookies"]:
+                        CookieMiddleware.delete_cookie(
                             message,
-                            self.cookie_name,
-                            self.scope["session"].session_key,
-                            max_age=max_age,
-                            expires=expires,
-                            domain=settings.SESSION_COOKIE_DOMAIN,
+                            settings.SESSION_COOKIE_NAME,
                             path=settings.SESSION_COOKIE_PATH,
-                            secure=settings.SESSION_COOKIE_SECURE or None,
-                            httponly=settings.SESSION_COOKIE_HTTPONLY or None,
+                            domain=settings.SESSION_COOKIE_DOMAIN,
                         )
+                else:
+                    # Get the expiry data
+                    if scope["session"].get_expire_at_browser_close():
+                        max_age = None
+                        expires = None
+                    else:
+                        max_age = scope["session"].get_expiry_age()
+                        expires_time = time.time() + max_age
+                        expires = http_date(expires_time)
+                    # Set the cookie
+                    CookieMiddleware.set_cookie(
+                        message,
+                        self.cookie_name,
+                        scope["session"].session_key,
+                        max_age=max_age,
+                        expires=expires,
+                        domain=settings.SESSION_COOKIE_DOMAIN,
+                        path=settings.SESSION_COOKIE_PATH,
+                        secure=settings.SESSION_COOKIE_SECURE or None,
+                        httponly=settings.SESSION_COOKIE_HTTPONLY or None,
+                    )
         # Pass up the send
-        return await self.real_send(message)
+        return await real_send(message)
 
-    def save_session(self):
+    def save_session(self, scope):
         """
         Saves the current session.
         """
         try:
-            self.scope["session"].save()
+            scope["session"].save()
         except UpdateError:
             raise SuspiciousOperation(
                 "The request's session was deleted before the "
